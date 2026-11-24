@@ -1121,6 +1121,135 @@ pub fn render_triangle() -> Result<(), String> {
     }
 }
 
+/// A triangle recorded in a bundle and drawn by `ExecuteBundle` from a direct list: green over
+/// the blue clear colour.
+pub fn bundle_draw() -> Result<(), String> {
+    unsafe {
+        let dev = device()?;
+        let queue: ID3D12CommandQueue = dev.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC::default()).map_err(e)?;
+        let rs = root_signature(&dev)?;
+        let vs = compile(
+            "float4 main(uint id : SV_VertexID) : SV_Position { float2 p[3] = { float2(-0.5,-0.5), float2(0.0,0.5), float2(0.5,-0.5) }; return float4(p[id], 0, 1); }",
+            "vs_5_0",
+        )?;
+        let ps = compile("float4 main() : SV_Target { return float4(0, 1, 0, 1); }", "ps_5_0")?;
+        let pso: ID3D12PipelineState = dev.CreateGraphicsPipelineState(&pso_desc(&rs, bc(&vs), bc(&ps))).map_err(e)?;
+
+        let (w, h) = (64u32, 64u32);
+        let tex = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: w as u64,
+            Height: h,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+            ..Default::default()
+        };
+        let clear = D3D12_CLEAR_VALUE { Format: DXGI_FORMAT_R8G8B8A8_UNORM, Anonymous: D3D12_CLEAR_VALUE_0 { Color: [0.0, 0.0, 1.0, 1.0] } };
+        let mut rt: Option<ID3D12Resource> = None;
+        dev.CreateCommittedResource(
+            &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+            D3D12_HEAP_FLAG_NONE,
+            &tex,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            Some(&clear),
+            &mut rt,
+        )
+        .map_err(e)?;
+        let rt = rt.ok_or("no render target")?;
+        let heap: ID3D12DescriptorHeap = dev
+            .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC { Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV, NumDescriptors: 1, ..Default::default() })
+            .map_err(e)?;
+        let start: unsafe extern "system" fn(*mut c_void) -> usize = transmute_copy(&(*(*(heap.as_raw() as *const *const usize)).add(9)));
+        let rtv = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: start(heap.as_raw()) };
+        dev.CreateRenderTargetView(&rt, None, rtv);
+
+        let mut layout = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+        let mut total = 0u64;
+        dev.GetCopyableFootprints(&tex, 0, 1, 0, Some(&mut layout), None, None, Some(&mut total));
+        let mut rb: Option<ID3D12Resource> = None;
+        dev.CreateCommittedResource(
+            &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_READBACK, ..Default::default() },
+            D3D12_HEAP_FLAG_NONE,
+            &D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                Width: total,
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                ..Default::default()
+            },
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            None,
+            &mut rb,
+        )
+        .map_err(e)?;
+        let rb = rb.ok_or("no readback buffer")?;
+
+        // the bundle: its own allocator type, the pipeline it was made with, one draw
+        let bundle_alloc: ID3D12CommandAllocator = dev.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE).map_err(e)?;
+        let bundle: ID3D12GraphicsCommandList = dev.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE, &bundle_alloc, &pso).map_err(e)?;
+        xslot::<SetRootSignature>(&bundle, X_SET_GRAPHICS_ROOT_SIGNATURE)(bundle.as_raw(), rs.as_raw());
+        bundle.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        bundle.DrawInstanced(3, 1, 0, 0);
+        bundle.Close().map_err(e)?;
+
+        let alloc: ID3D12CommandAllocator = dev.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).map_err(e)?;
+        let list: ID3D12GraphicsCommandList = dev.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, &pso).map_err(e)?;
+        xslot::<OmSetRenderTargets>(&list, X_OM_SET_RENDER_TARGETS)(list.as_raw(), 1, &rtv, 0, std::ptr::null());
+        xslot::<ClearRtv>(&list, X_CLEAR_RENDER_TARGET_VIEW)(list.as_raw(), rtv, &[0.0, 0.0, 1.0, 1.0], 0, std::ptr::null());
+        list.RSSetViewports(&[D3D12_VIEWPORT { TopLeftX: 0.0, TopLeftY: 0.0, Width: w as f32, Height: h as f32, MinDepth: 0.0, MaxDepth: 1.0 }]);
+        list.RSSetScissorRects(&[RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 }]);
+        xslot::<SetRootSignature>(&list, X_SET_GRAPHICS_ROOT_SIGNATURE)(list.as_raw(), rs.as_raw());
+        list.ExecuteBundle(&bundle);
+        list.ResourceBarrier(&[D3D12_RESOURCE_BARRIER {
+            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                    pResource: transmute_copy(&rt),
+                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                    StateBefore: D3D12_RESOURCE_STATE_RENDER_TARGET,
+                    StateAfter: D3D12_RESOURCE_STATE_COPY_SOURCE,
+                }),
+            },
+        }]);
+        let dst = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: transmute_copy(&rb),
+            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: layout },
+        };
+        let src = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: transmute_copy(&rt),
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+        };
+        list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+        list.Close().map_err(e)?;
+        queue.ExecuteCommandLists(&[Some(list.cast().map_err(e)?)]);
+        let fence: ID3D12Fence = dev.CreateFence(0, D3D12_FENCE_FLAG_NONE).map_err(e)?;
+        wait(&queue, &fence, 1)?;
+
+        let mut p = std::ptr::null_mut();
+        rb.Map(0, None, Some(&mut p)).map_err(e)?;
+        let pitch = layout.Footprint.RowPitch as usize;
+        let px = |x: usize, y: usize| -> [u8; 4] {
+            let o = y * pitch + x * 4;
+            let s = std::slice::from_raw_parts((p as *const u8).add(o), 4);
+            [s[0], s[1], s[2], s[3]]
+        };
+        let (center, corner) = (px(32, 32), px(1, 1));
+        rb.Unmap(0, None);
+        ensure!(center == [0, 255, 0, 255], "centre pixel {center:?} (expected green: the bundle's triangle)");
+        ensure!(corner == [0, 0, 255, 255], "corner pixel {corner:?} (expected blue clear colour)");
+        Ok(())
+    }
+}
+
 /// Media Foundation `MFResetDXGIDeviceManagerX` with the console `d3d12_xs` device.
 pub fn mfplat_reset_dxgi_device_manager() -> Result<(), String> {
     const MF_VERSION: u32 = 0x0002_0070;
