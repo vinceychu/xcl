@@ -1,0 +1,90 @@
+# Fork-only: cross-build xcl.exe on Linux and run the test title under Wine + vkd3d-proton
+# (scripts/linux/xcl-linux.sh) on Mesa's software Vulkan driver, since the runner has no GPU.
+# Informational for now: it reports the test title's counts and does not fail on them.
+name: Linux (Wine)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-wine-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wine:
+    name: Test title under Wine (software Vulkan)
+    if: github.repository != 'ivall/xcl' && github.repository != 'xcl-dev/xcl'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      XCL_LINUX_HOME: ${{ github.workspace }}/.xcl-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang lld llvm xvfb mesa-vulkan-drivers vulkan-tools unzip
+          # cargo-xwin and cc want the unversioned MSVC-style tool names
+          mkdir -p "$HOME/xwin-bin"
+          for t in clang-cl lld-link llvm-lib llvm-ar llvm-rc llvm-dlltool; do
+            command -v "$t" >/dev/null && continue
+            s=$(ls /usr/bin/$t-* 2>/dev/null | sort -V | tail -1)
+            [ -n "$s" ] && ln -sf "$s" "$HOME/xwin-bin/$t"
+          done
+          echo "$HOME/xwin-bin" >> "$GITHUB_PATH"
+          vulkaninfo --summary | grep -E 'deviceName|apiVersion' || true
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/bin/cargo-xwin
+            ~/.cache/cargo-xwin
+            target
+            .xcl-linux/GE-Proton*
+          key: linux-wine-${{ hashFiles('Cargo.lock', 'scripts/linux/xcl-linux.sh') }}
+          restore-keys: linux-wine-
+
+      - name: Cross-build for Windows
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          command -v cargo-xwin >/dev/null || cargo install cargo-xwin --locked
+          # libudis86-sys passes a GCC-style forced include that clang-cl ignores
+          CL=/FIstring.h cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
+
+      - name: Set up Wine and XCL
+        run: XCL_EXE=target/x86_64-pc-windows-msvc/release/xcl.exe scripts/linux/xcl-linux.sh setup
+
+      - name: Run the test title
+        run: |
+          game="$RUNNER_TEMP/testgame"
+          mkdir -p "$game"
+          cp -r tests/data/testgame/. "$game/"
+          cp target/x86_64-pc-windows-msvc/release/xcl_testtitle.exe target/x86_64-pc-windows-msvc/release/testgame_mw.dll "$game/"
+          set +e
+          timeout 600 scripts/linux/xcl-linux.sh --headless run "$game" -- --hello > title.log 2> title.err
+          code=$?
+          set -e
+          pass=$(grep -c '^\[PASS\]' title.log || true)
+          fail=$(grep -c '^\[FAIL\]' title.log || true)
+          {
+            echo "### Test title under Wine (software Vulkan)"
+            echo "exit code $code: $pass passed, $fail failed"
+            echo '```'
+            grep -E '^\[FAIL\]|GPU:|CRASH|exited with' title.log | cut -c1-300 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^\[(PASS|FAIL)\]|GPU:|CRASH|exited with' title.log | cut -c1-300 || true
+          tail -5 title.err | cut -c1-300 || true
+          # the loader, files and saves do not need a GPU: fewer passes than that is a failure
+          [ "$pass" -ge 20 ]
