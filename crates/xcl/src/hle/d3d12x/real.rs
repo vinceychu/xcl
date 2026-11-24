@@ -688,6 +688,27 @@ pub(super) unsafe fn preserve_vtable(this: *mut c_void, prev_ext: usize) {
     }
 }
 
+/// Run `f` while the adopted `obj` has its runtime's own vtable pointer back. vkd3d-proton
+/// (D3D12 on Vulkan, under Wine / Proton) recognises the command allocator given to a list's
+/// `Reset` by its vtable pointer and refuses XCL's extended one with E_INVALIDARG ("Invalid
+/// command allocator"). D3D12 lets one thread at a time use an allocator, and the list's Reset
+/// is that use, so no other call can see the native table meanwhile.
+pub(super) unsafe fn with_native_vtable<R>(obj: *mut c_void, f: impl FnOnce() -> R) -> R {
+    if !is_adopted(obj) {
+        return f();
+    }
+    let ext = *(obj as *const usize);
+    let orig = *(ext as *const usize).sub(1);
+    *(obj as *mut usize) = orig;
+    let r = f();
+    if *(obj as *const usize) == orig {
+        *(obj as *mut usize) = ext;
+    } else {
+        preserve_vtable(obj, ext);
+    }
+    r
+}
+
 /// An adopted object gets the extended vtable of another kind (a DMA list: created as a PC
 /// list, it needs the console's DMA layout).
 pub(super) unsafe fn readopt(obj: *mut c_void, kind: Kind) {
@@ -2552,7 +2573,7 @@ unsafe extern "system" fn cl_reset(this: *mut c_void, allocator: *mut c_void, in
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) -> HRESULT =
         std::mem::transmute(orig_fn(this, slot_of(this, "Reset")));
     let resolved = super::pso_async::resolve_for_bind(initial_state as usize) as *mut c_void;
-    let hr = f(this, allocator, resolved);
+    let hr = with_native_vtable(allocator, || f(this, allocator, resolved));
     preserve_vtable(this, ext);
     if hr >= 0 {
         super::list_x::on_pc_reset(this);

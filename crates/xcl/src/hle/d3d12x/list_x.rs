@@ -3581,7 +3581,8 @@ pub unsafe extern "system" fn reset_x(this: *mut c_void, alloc: usize, pso: usiz
     // (the PC allocator the title's allocator stands for now: `alloc_pool`)
     let ty = LISTS.lock().unwrap().as_ref().and_then(|m| m.get(&(this as usize))).and_then(|s| s.list_type).map_or(-1, |t| t.0);
     let hr = super::alloc_pool::reset_list(this as usize, alloc, ty, |pc_alloc| {
-        pc::<unsafe extern "system" fn(*mut c_void, usize, usize) -> i32>(this, PC_RESET)(this, pc_alloc, resolved)
+        let reset = pc::<unsafe extern "system" fn(*mut c_void, usize, usize) -> i32>(this, PC_RESET);
+        real::with_native_vtable(pc_alloc as *mut c_void, || reset(this, pc_alloc, resolved))
     });
     real::preserve_vtable(this, ext);
     if hr < 0 {
