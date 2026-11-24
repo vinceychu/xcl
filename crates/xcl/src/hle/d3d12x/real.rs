@@ -2505,6 +2505,7 @@ fn overrides(kind: Kind) -> Vec<(&'static str, usize)> {
             ("OMSetRenderTargets", cl_om_set_render_targets as usize),
             ("ClearRenderTargetView", cl_clear_rtv as usize),
             ("ExecuteIndirect", cl_execute_indirect as usize),
+            ("ExecuteBundle", cl_execute_bundle as usize),
         ]),
         Kind::DmaList => v.extend_from_slice(&[
             ("Release", cl_release as usize),
@@ -2584,6 +2585,13 @@ unsafe extern "system" fn cl_close(this: *mut c_void) -> HRESULT {
         crate::xlog_warn!("D3D12.X: command list {this:p} (type {}) Close → {:#x}", ty(this), hr as u32);
     }
     hr
+}
+
+/// ExecuteBundle: vkd3d-proton recognises the bundle by its vtable pointer as well and leaves
+/// an adopted one out (`with_native_vtables`).
+unsafe extern "system" fn cl_execute_bundle(this: *mut c_void, bundle: *mut c_void) {
+    let f: unsafe extern "system" fn(*mut c_void, *mut c_void) = std::mem::transmute(orig_fn(this, slot_of(this, "ExecuteBundle")));
+    with_native_vtable(bundle, || f(this, bundle));
 }
 
 /// Reset (PC path): re-adopt the runtime's new open-state vtable if Reset replaced it.
