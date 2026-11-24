@@ -688,25 +688,40 @@ pub(super) unsafe fn preserve_vtable(this: *mut c_void, prev_ext: usize) {
     }
 }
 
-/// Run `f` while the adopted `obj` has its runtime's own vtable pointer back. vkd3d-proton
-/// (D3D12 on Vulkan, under Wine / Proton) recognises the command allocator given to a list's
-/// `Reset` (and to CreateCommandList, which resets the new list) by its vtable pointer and refuses XCL's extended one with E_INVALIDARG ("Invalid
-/// command allocator"). D3D12 lets one thread at a time use an allocator, and the list's Reset
-/// is that use, so no other call can see the native table meanwhile.
-pub(super) unsafe fn with_native_vtable<R>(obj: *mut c_void, f: impl FnOnce() -> R) -> R {
-    if !is_adopted(obj) {
+/// Run `f` while the adopted `objs` have their runtime's own vtable pointers back. Under Wine
+/// only: vkd3d-proton (D3D12 on Vulkan) recognises some objects passed to it by their vtable
+/// pointer and does not know XCL's extended one – the command allocator given to
+/// CreateCommandList or a list's `Reset` is refused with E_INVALIDARG ("Invalid command
+/// allocator"), and a list given to ExecuteCommandLists is taken for none (a null pointer is
+/// then read). D3D12 lets one thread at a time use an allocator or a list, and these calls are
+/// that use, so no other call sees the native table meanwhile.
+pub(super) unsafe fn with_native_vtables<R>(objs: &[*mut c_void], f: impl FnOnce() -> R) -> R {
+    if !crate::util::under_wine() {
         return f();
     }
-    let ext = *(obj as *const usize);
-    let orig = *(ext as *const usize).sub(1);
-    *(obj as *mut usize) = orig;
+    let mut swapped: Vec<(*mut c_void, usize, usize)> = Vec::new();
+    for &obj in objs {
+        if is_adopted(obj) {
+            let ext = *(obj as *const usize);
+            let orig = *(ext as *const usize).sub(1);
+            *(obj as *mut usize) = orig;
+            swapped.push((obj, ext, orig));
+        }
+    }
     let r = f();
-    if *(obj as *const usize) == orig {
-        *(obj as *mut usize) = ext;
-    } else {
-        preserve_vtable(obj, ext);
+    for (obj, ext, orig) in swapped {
+        if *(obj as *const usize) == orig {
+            *(obj as *mut usize) = ext;
+        } else {
+            preserve_vtable(obj, ext);
+        }
     }
     r
+}
+
+/// `with_native_vtables` for one object.
+pub(super) unsafe fn with_native_vtable<R>(obj: *mut c_void, f: impl FnOnce() -> R) -> R {
+    with_native_vtables(&[obj], f)
 }
 
 /// An adopted object gets the extended vtable of another kind (a DMA list: created as a PC
@@ -5354,7 +5369,7 @@ unsafe extern "system" fn q_execute_command_lists(this: *mut c_void, n: u32, lis
     }
     super::list_x::note_queue_for_lists(this as usize, &mapped);
     super::list_x::execute_with_waits_on(this, &mapped, |chunk| {
-        f(this, chunk.len() as u32, chunk.as_ptr());
+        with_native_vtables(chunk, || f(this, chunk.len() as u32, chunk.as_ptr()));
         super::list_x::copy_scratch_submitted(this, chunk);
         super::alloc_pool::executed(this, chunk);
         super::list_x::signal_write64_fences(this, chunk);
