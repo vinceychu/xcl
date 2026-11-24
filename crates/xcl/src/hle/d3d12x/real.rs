@@ -699,6 +699,10 @@ pub(super) unsafe fn with_native_vtables<R>(objs: &[*mut c_void], f: impl FnOnce
     if !crate::util::under_wine() {
         return f();
     }
+    swap_native_vtables(objs, f)
+}
+
+unsafe fn swap_native_vtables<R>(objs: &[*mut c_void], f: impl FnOnce() -> R) -> R {
     let mut swapped: Vec<(*mut c_void, usize, usize)> = Vec::new();
     for &obj in objs {
         if is_adopted(obj) {
@@ -5676,6 +5680,39 @@ mod this_first_tests {
             let s = stale.as_ptr() as *mut c_void;
             assert!(this_first(b, s) && this_first(s, b));
             drop(Box::from_raw(obj as *mut [usize; 1]));
+        }
+        if let Some(g) = EXTS.lock().unwrap().as_mut() {
+            g.remove(&vtbl);
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_vtable_tests {
+    use super::*;
+
+    /// `swap_native_vtables`: an adopted object shows its runtime's vtable pointer during the
+    /// call and XCL's afterwards (also when it is passed twice, or the call replaced the
+    /// pointer); other pointers are left alone. Synthetic objects; no GPU.
+    #[test]
+    fn adopted_objects_show_the_runtime_vtable_during_the_call_only() {
+        let pc = [0usize; 32];
+        let ext = [pc.as_ptr() as usize, 0];
+        let vtbl = ext.as_ptr() as usize + 8;
+        EXTS.lock().unwrap().get_or_insert_with(HashSet::new).insert(vtbl);
+        let mut adopted = [vtbl];
+        let a = adopted.as_mut_ptr() as *mut c_void;
+        let mut plain = [0x1234_5678usize];
+        let p = plain.as_mut_ptr() as *mut c_void;
+        unsafe {
+            let seen = swap_native_vtables(&[a, p, std::ptr::null_mut(), a], || (*(a as *const usize), *(p as *const usize)));
+            assert_eq!(seen, (pc.as_ptr() as usize, 0x1234_5678));
+            assert_eq!(*(a as *const usize), vtbl);
+            assert_eq!(*(p as *const usize), 0x1234_5678);
+            // the runtime put another of its tables there: XCL's comes back all the same
+            let other = [0usize; 32];
+            swap_native_vtables(&[a], || *(a as *mut usize) = other.as_ptr() as usize);
+            assert_eq!(*(a as *const usize), vtbl);
         }
         if let Some(g) = EXTS.lock().unwrap().as_mut() {
             g.remove(&vtbl);
