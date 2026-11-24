@@ -1,0 +1,40 @@
+# Fork-only: merge ivall/xcl main into this fork's main a few times a day, then build a release.
+# A push made with the workflow token starts no other workflow, hence the explicit dispatch.
+# The token cannot push a merge that changes .github/workflows: such a merge fails here and has
+# to be done by hand.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+
+jobs:
+  sync:
+    if: github.repository != 'ivall/xcl'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Merge upstream main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch https://github.com/ivall/xcl.git main
+          before=$(git rev-parse HEAD)
+          git merge --no-edit FETCH_HEAD
+          if [ "$(git rev-parse HEAD)" = "$before" ]; then echo "up to date"; exit 0; fi
+          git push origin main
+          gh workflow run release.yml --ref main
