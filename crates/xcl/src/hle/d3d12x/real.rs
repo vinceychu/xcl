@@ -690,7 +690,7 @@ pub(super) unsafe fn preserve_vtable(this: *mut c_void, prev_ext: usize) {
 
 /// Run `f` while the adopted `obj` has its runtime's own vtable pointer back. vkd3d-proton
 /// (D3D12 on Vulkan, under Wine / Proton) recognises the command allocator given to a list's
-/// `Reset` by its vtable pointer and refuses XCL's extended one with E_INVALIDARG ("Invalid
+/// `Reset` (and to CreateCommandList, which resets the new list) by its vtable pointer and refuses XCL's extended one with E_INVALIDARG ("Invalid
 /// command allocator"). D3D12 lets one thread at a time use an allocator, and the list's Reset
 /// is that use, so no other call can see the native table meanwhile.
 pub(super) unsafe fn with_native_vtable<R>(obj: *mut c_void, f: impl FnOnce() -> R) -> R {
@@ -2732,7 +2732,13 @@ macro_rules! creator {
 creator!(dev_create_command_queue, "CreateCommandQueue", Kind::CommandQueue, [a1]);
 creator!(dev_create_command_queue1, "CreateCommandQueue1", Kind::CommandQueue, [a1, a2]);
 creator!(dev_create_command_allocator, "CreateCommandAllocator", Kind::CommandAllocator, [a1]);
-creator!(dev_create_command_list, "CreateCommandList", Kind::CommandList, [a1, a2, a3, a4]);
+creator!(dev_create_command_list_raw, "CreateCommandList", Kind::CommandList, [a1, a2, a3, a4]);
+
+/// CreateCommandList(node mask, type, allocator, initial pipeline, riid, list): vkd3d-proton
+/// resets the new list on the allocator (`with_native_vtable`).
+pub(super) unsafe extern "system" fn dev_create_command_list(this: *mut c_void, a1: usize, a2: usize, a3: usize, a4: usize, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
+    with_native_vtable(a3 as *mut c_void, || dev_create_command_list_raw(this, a1, a2, a3, a4, riid, ppv))
+}
 creator!(dev_create_command_list1, "CreateCommandList1", Kind::CommandList, [a1, a2, a3]);
 
 /// Create a raw adopted PC `ID3D12GraphicsCommandList` without wrapping it in `title_list`
@@ -2754,7 +2760,7 @@ pub(super) unsafe fn create_raw_pc_command_list(
         type F = unsafe extern "system" fn(*mut c_void, u32, D3D12_COMMAND_LIST_TYPE, usize, usize, *const GUID, *mut *mut c_void) -> HRESULT;
         let slot = layout::slot(layout::find("ID3D12Device")?, "CreateCommandList")?;
         let f: F = std::mem::transmute(*vt(dev).add(slot));
-        let hr = f(dev, 0, ty, alloc, init_pso, &iid, &mut out);
+        let hr = with_native_vtable(alloc as *mut c_void, || f(dev, 0, ty, alloc, init_pso, &iid, &mut out));
         if hr >= 0 && !out.is_null() {
             adopt(out, Kind::CommandList);
         }
