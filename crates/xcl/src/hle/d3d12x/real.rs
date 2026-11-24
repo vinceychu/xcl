@@ -2587,10 +2587,12 @@ unsafe extern "system" fn cl_close(this: *mut c_void) -> HRESULT {
     hr
 }
 
-/// ExecuteBundle: vkd3d-proton recognises the bundle by its vtable pointer as well and leaves
-/// an adopted one out (`with_native_vtables`).
+/// ExecuteBundle(bundle): the title's bundle is a console-shaped list (`title_list`), and the
+/// runtime needs the PC bundle behind it – it was given the console object and drew nothing.
+/// vkd3d-proton also recognises a bundle by its vtable pointer (`with_native_vtables`).
 unsafe extern "system" fn cl_execute_bundle(this: *mut c_void, bundle: *mut c_void) {
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void) = std::mem::transmute(orig_fn(this, slot_of(this, "ExecuteBundle")));
+    let bundle = super::title_list::backing(bundle).unwrap_or(bundle);
     with_native_vtable(bundle, || f(this, bundle));
 }
 

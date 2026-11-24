@@ -19,10 +19,9 @@ vtable pointer, which it checks (`real::with_native_vtables`, Wine only).
   GE-Proton, makes a Wine prefix with vkd3d-proton and fetches `xcl.exe` + DXC, all under
   `~/.local/share/xcl-linux` (`--headless` runs on a private X server).
 - Measured on an NVIDIA RTX 5090, GE-Proton11-14 (Wine + vkd3d-proton, DXVK's `dxgi.dll`),
-  DXC 1.9: the test title (`tests/testtitle`) passes 47 of its 48 checks. The one that fails,
+  DXC 1.9: the test title (`tests/testtitle`) passes 48 of its 49 checks. The one that fails,
   "user32: … hidden 1920x1080 console screen: not cloaked", asks for a DWM cloak Wine does not have.
-- No retail game has been run on Linux yet. Bundles (`ExecuteBundle`) get the same treatment but
-  no test draws with one.
+- No retail game has been run on Linux yet.
 - `xgameruntime.dll` (Gaming Services) is absent under Wine; XCL warns and uses its own task
   queues, async and networking.
 - On a headless X server, start it without the Composite extension (`Xvfb -extension Composite`):

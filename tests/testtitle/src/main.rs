@@ -682,6 +682,7 @@ fn main() {
     check("D3D12.X: shaders captured; console shader gets a fallback PSO", gpu::pso_capture_and_fallback);
     check("D3D12.X: retail-format console shader (XDAT/XBCH/FSSM) captured + fallback PSO", gpu::xbox_native_pso);
     check("D3D12.X: triangle rendered on the real GPU and read back (console + derived pipeline)", gpu::render_triangle);
+    check("D3D12.X: a bundle's triangle drawn by ExecuteBundle and read back", gpu::bundle_draw);
     check("D3D12.X: frame clock + PresentX of the title's back buffer", gpu::present_x_frame);
     check("D3D12.X: console device methods (placed title memory, DMA queue + list, page pools)", gpu::console_device_methods);
     check("D3D12.X: console command list memory methods (writes, timestamp, fill, copy, KickoffX, Wait32/64)", gpu::console_list_methods);
