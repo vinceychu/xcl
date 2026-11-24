@@ -85,6 +85,12 @@ unsafe fn pc<F: Copy>(list: *mut c_void, slot: usize) -> F {
     transmute_copy(&real::orig_fn(list, slot))
 }
 
+/// The PC list's Reset on the PC allocator `pc_alloc` (`real::with_native_vtables`).
+unsafe fn pc_reset(list: *mut c_void, pc_alloc: usize, pso: usize) -> i32 {
+    let reset = pc::<unsafe extern "system" fn(*mut c_void, usize, usize) -> i32>(list, PC_RESET);
+    real::with_native_vtable(pc_alloc as *mut c_void, || reset(list, pc_alloc, pso))
+}
+
 unsafe fn list_type(list: *mut c_void) -> D3D12_COMMAND_LIST_TYPE {
     pc::<unsafe extern "system" fn(*mut c_void) -> D3D12_COMMAND_LIST_TYPE>(list, PC_GET_TYPE)(list)
 }
@@ -2484,7 +2490,7 @@ unsafe fn try_split_for_wait(list: *mut c_void) -> Option<*mut c_void> {
     if let Some(spare) = super::title_list::pop_spare(wrapper) {
         let ext_spare = *(spare as *const usize);
         let reset_hr = super::alloc_pool::reset_list(spare as usize, alloc, ty.0, |pc_alloc| {
-            pc::<unsafe extern "system" fn(*mut c_void, usize, usize) -> i32>(spare, PC_RESET)(spare, pc_alloc, init_pso)
+            pc_reset(spare, pc_alloc, init_pso)
         });
         real::preserve_vtable(spare, ext_spare);
         if reset_hr >= 0 {
@@ -2957,7 +2963,7 @@ pub unsafe extern "system" fn kickoff_x(this: *mut c_void) {
     if let Some((_, ref prior, _)) = kickoff_split {
         if !prior.is_empty() {
             execute_with_waits_on(q_raw, prior, |chunk| {
-                exec(q_raw, chunk.len() as u32, chunk.as_ptr());
+                real::with_native_vtables(chunk, || exec(q_raw, chunk.len() as u32, chunk.as_ptr()));
                 copy_scratch_submitted(q_raw, chunk);
                 super::alloc_pool::executed(q_raw, chunk);
                 signal_write64_fences(q_raw, chunk);
@@ -2976,7 +2982,7 @@ pub unsafe extern "system" fn kickoff_x(this: *mut c_void) {
     }
 
     let one = [this];
-    exec(q_raw, 1, one.as_ptr());
+    real::with_native_vtables(&one, || exec(q_raw, 1, one.as_ptr()));
     copy_scratch_submitted(q_raw, &one);
     super::alloc_pool::executed(q_raw, &one);
     signal_write64_pairs(q_raw, &write64_signals);
@@ -3029,7 +3035,7 @@ pub unsafe extern "system" fn kickoff_x(this: *mut c_void) {
     let ext_closed = *(target as *const usize);
     let init_pso = super::pso_async::resolve_for_bind(bound_pso);
     let reset_hr = super::alloc_pool::reset_list(target as usize, alloc, list_type(target).0, |pc_alloc| {
-        pc::<unsafe extern "system" fn(*mut c_void, usize, usize) -> i32>(target, PC_RESET)(target, pc_alloc, init_pso)
+        pc_reset(target, pc_alloc, init_pso)
     });
     real::preserve_vtable(target, ext_closed);
     if reset_hr < 0 {
@@ -3581,7 +3587,7 @@ pub unsafe extern "system" fn reset_x(this: *mut c_void, alloc: usize, pso: usiz
     // (the PC allocator the title's allocator stands for now: `alloc_pool`)
     let ty = LISTS.lock().unwrap().as_ref().and_then(|m| m.get(&(this as usize))).and_then(|s| s.list_type).map_or(-1, |t| t.0);
     let hr = super::alloc_pool::reset_list(this as usize, alloc, ty, |pc_alloc| {
-        pc::<unsafe extern "system" fn(*mut c_void, usize, usize) -> i32>(this, PC_RESET)(this, pc_alloc, resolved)
+        pc_reset(this, pc_alloc, resolved)
     });
     real::preserve_vtable(this, ext);
     if hr < 0 {

@@ -688,6 +688,46 @@ pub(super) unsafe fn preserve_vtable(this: *mut c_void, prev_ext: usize) {
     }
 }
 
+/// Run `f` while the adopted `objs` have their runtime's own vtable pointers back. Under Wine
+/// only: vkd3d-proton (D3D12 on Vulkan) recognises some objects passed to it by their vtable
+/// pointer and does not know XCL's extended one – the command allocator given to
+/// CreateCommandList or a list's `Reset` is refused with E_INVALIDARG ("Invalid command
+/// allocator"), and a list given to ExecuteCommandLists is taken for none (a null pointer is
+/// then read). D3D12 lets one thread at a time use an allocator or a list, and these calls are
+/// that use, so no other call sees the native table meanwhile.
+pub(super) unsafe fn with_native_vtables<R>(objs: &[*mut c_void], f: impl FnOnce() -> R) -> R {
+    if !crate::util::under_wine() {
+        return f();
+    }
+    swap_native_vtables(objs, f)
+}
+
+unsafe fn swap_native_vtables<R>(objs: &[*mut c_void], f: impl FnOnce() -> R) -> R {
+    let mut swapped: Vec<(*mut c_void, usize, usize)> = Vec::new();
+    for &obj in objs {
+        if is_adopted(obj) {
+            let ext = *(obj as *const usize);
+            let orig = *(ext as *const usize).sub(1);
+            *(obj as *mut usize) = orig;
+            swapped.push((obj, ext, orig));
+        }
+    }
+    let r = f();
+    for (obj, ext, orig) in swapped {
+        if *(obj as *const usize) == orig {
+            *(obj as *mut usize) = ext;
+        } else {
+            preserve_vtable(obj, ext);
+        }
+    }
+    r
+}
+
+/// `with_native_vtables` for one object.
+pub(super) unsafe fn with_native_vtable<R>(obj: *mut c_void, f: impl FnOnce() -> R) -> R {
+    with_native_vtables(&[obj], f)
+}
+
 /// An adopted object gets the extended vtable of another kind (a DMA list: created as a PC
 /// list, it needs the console's DMA layout).
 pub(super) unsafe fn readopt(obj: *mut c_void, kind: Kind) {
@@ -2465,6 +2505,7 @@ fn overrides(kind: Kind) -> Vec<(&'static str, usize)> {
             ("OMSetRenderTargets", cl_om_set_render_targets as usize),
             ("ClearRenderTargetView", cl_clear_rtv as usize),
             ("ExecuteIndirect", cl_execute_indirect as usize),
+            ("ExecuteBundle", cl_execute_bundle as usize),
         ]),
         Kind::DmaList => v.extend_from_slice(&[
             ("Release", cl_release as usize),
@@ -2546,13 +2587,20 @@ unsafe extern "system" fn cl_close(this: *mut c_void) -> HRESULT {
     hr
 }
 
+/// ExecuteBundle: vkd3d-proton recognises the bundle by its vtable pointer as well and leaves
+/// an adopted one out (`with_native_vtables`).
+unsafe extern "system" fn cl_execute_bundle(this: *mut c_void, bundle: *mut c_void) {
+    let f: unsafe extern "system" fn(*mut c_void, *mut c_void) = std::mem::transmute(orig_fn(this, slot_of(this, "ExecuteBundle")));
+    with_native_vtable(bundle, || f(this, bundle));
+}
+
 /// Reset (PC path): re-adopt the runtime's new open-state vtable if Reset replaced it.
 unsafe extern "system" fn cl_reset(this: *mut c_void, allocator: *mut c_void, initial_state: *mut c_void) -> HRESULT {
     let ext = *(this as *const usize);
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) -> HRESULT =
         std::mem::transmute(orig_fn(this, slot_of(this, "Reset")));
     let resolved = super::pso_async::resolve_for_bind(initial_state as usize) as *mut c_void;
-    let hr = f(this, allocator, resolved);
+    let hr = with_native_vtable(allocator, || f(this, allocator, resolved));
     preserve_vtable(this, ext);
     if hr >= 0 {
         super::list_x::on_pc_reset(this);
@@ -2711,7 +2759,13 @@ macro_rules! creator {
 creator!(dev_create_command_queue, "CreateCommandQueue", Kind::CommandQueue, [a1]);
 creator!(dev_create_command_queue1, "CreateCommandQueue1", Kind::CommandQueue, [a1, a2]);
 creator!(dev_create_command_allocator, "CreateCommandAllocator", Kind::CommandAllocator, [a1]);
-creator!(dev_create_command_list, "CreateCommandList", Kind::CommandList, [a1, a2, a3, a4]);
+creator!(dev_create_command_list_raw, "CreateCommandList", Kind::CommandList, [a1, a2, a3, a4]);
+
+/// CreateCommandList(node mask, type, allocator, initial pipeline, riid, list): vkd3d-proton
+/// resets the new list on the allocator (`with_native_vtable`).
+pub(super) unsafe extern "system" fn dev_create_command_list(this: *mut c_void, a1: usize, a2: usize, a3: usize, a4: usize, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
+    with_native_vtable(a3 as *mut c_void, || dev_create_command_list_raw(this, a1, a2, a3, a4, riid, ppv))
+}
 creator!(dev_create_command_list1, "CreateCommandList1", Kind::CommandList, [a1, a2, a3]);
 
 /// Create a raw adopted PC `ID3D12GraphicsCommandList` without wrapping it in `title_list`
@@ -2733,7 +2787,7 @@ pub(super) unsafe fn create_raw_pc_command_list(
         type F = unsafe extern "system" fn(*mut c_void, u32, D3D12_COMMAND_LIST_TYPE, usize, usize, *const GUID, *mut *mut c_void) -> HRESULT;
         let slot = layout::slot(layout::find("ID3D12Device")?, "CreateCommandList")?;
         let f: F = std::mem::transmute(*vt(dev).add(slot));
-        let hr = f(dev, 0, ty, alloc, init_pso, &iid, &mut out);
+        let hr = with_native_vtable(alloc as *mut c_void, || f(dev, 0, ty, alloc, init_pso, &iid, &mut out));
         if hr >= 0 && !out.is_null() {
             adopt(out, Kind::CommandList);
         }
@@ -5327,7 +5381,7 @@ unsafe extern "system" fn q_execute_command_lists(this: *mut c_void, n: u32, lis
     }
     super::list_x::note_queue_for_lists(this as usize, &mapped);
     super::list_x::execute_with_waits_on(this, &mapped, |chunk| {
-        f(this, chunk.len() as u32, chunk.as_ptr());
+        with_native_vtables(chunk, || f(this, chunk.len() as u32, chunk.as_ptr()));
         super::list_x::copy_scratch_submitted(this, chunk);
         super::alloc_pool::executed(this, chunk);
         super::list_x::signal_write64_fences(this, chunk);
@@ -5634,6 +5688,39 @@ mod this_first_tests {
             let s = stale.as_ptr() as *mut c_void;
             assert!(this_first(b, s) && this_first(s, b));
             drop(Box::from_raw(obj as *mut [usize; 1]));
+        }
+        if let Some(g) = EXTS.lock().unwrap().as_mut() {
+            g.remove(&vtbl);
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_vtable_tests {
+    use super::*;
+
+    /// `swap_native_vtables`: an adopted object shows its runtime's vtable pointer during the
+    /// call and XCL's afterwards (also when it is passed twice, or the call replaced the
+    /// pointer); other pointers are left alone. Synthetic objects; no GPU.
+    #[test]
+    fn adopted_objects_show_the_runtime_vtable_during_the_call_only() {
+        let pc = [0usize; 32];
+        let ext = [pc.as_ptr() as usize, 0];
+        let vtbl = ext.as_ptr() as usize + 8;
+        EXTS.lock().unwrap().get_or_insert_with(HashSet::new).insert(vtbl);
+        let mut adopted = [vtbl];
+        let a = adopted.as_mut_ptr() as *mut c_void;
+        let mut plain = [0x1234_5678usize];
+        let p = plain.as_mut_ptr() as *mut c_void;
+        unsafe {
+            let seen = swap_native_vtables(&[a, p, std::ptr::null_mut(), a], || (*(a as *const usize), *(p as *const usize)));
+            assert_eq!(seen, (pc.as_ptr() as usize, 0x1234_5678));
+            assert_eq!(*(a as *const usize), vtbl);
+            assert_eq!(*(p as *const usize), 0x1234_5678);
+            // the runtime put another of its tables there: XCL's comes back all the same
+            let other = [0usize; 32];
+            swap_native_vtables(&[a], || *(a as *mut usize) = other.as_ptr() as usize);
+            assert_eq!(*(a as *const usize), vtbl);
         }
         if let Some(g) = EXTS.lock().unwrap().as_mut() {
             g.remove(&vtbl);
