@@ -1,0 +1,78 @@
+# Fork-only: build xcl.exe on every push to main and publish it as the rolling `latest` release,
+# with the DirectX Shader Compiler next to it (XCL looks for dxcompiler.dll + dxil.dll beside
+# xcl.exe), so a run needs no Rust toolchain and no Windows SDK.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Build and publish xcl.exe
+    if: github.repository != 'ivall/xcl'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust (stable, MSVC)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: release-${{ runner.os }}-
+
+      - name: Build
+        run: cargo build --release -p xcl
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist\xcl, dxc | Out-Null
+          Copy-Item target\release\xcl.exe, LICENSE, THIRD_PARTY.md, README.md dist\xcl\
+          # the newest official DXC (1.8+ is what the README recommends)
+          gh release download --repo microsoft/DirectXShaderCompiler --pattern 'dxc_*.zip' --dir dxc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Expand-Archive (Get-ChildItem dxc\dxc_*.zip | Select-Object -First 1) dxc\x
+          Copy-Item dxc\x\bin\x64\dxcompiler.dll, dxc\x\bin\x64\dxil.dll dist\xcl\
+          New-Item -ItemType Directory -Force dist\xcl\licenses-dxc | Out-Null
+          Get-ChildItem dxc\x -Filter 'LICENSE*' | Copy-Item -Destination dist\xcl\licenses-dxc\
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          "commit ${{ github.sha }}`nsource https://github.com/${{ github.repository }}/tree/${{ github.sha }}" |
+              Set-Content dist\xcl\BUILD.txt
+          Compress-Archive dist\xcl "xcl-windows-x64.zip"
+          Compress-Archive target\release\xcl.pdb "xcl-symbols.zip"
+          "SHORT_SHA=$sha" >> $env:GITHUB_ENV
+
+      - name: Publish rolling release
+        shell: pwsh
+        run: |
+          gh release delete latest --cleanup-tag --yes 2>$null
+          gh release create latest xcl-windows-x64.zip xcl-symbols.zip `
+            --target "${{ github.sha }}" `
+            --title "XCL $env:SHORT_SHA" `
+            --notes "Built from ${{ github.sha }}. Unzip and run ``xcl.exe`` (DXC is included). GPL-2.0-only; the source is this repository at that commit."
+          exit $LASTEXITCODE

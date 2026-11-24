@@ -23,6 +23,8 @@ jobs:
     name: >-
       ${{ ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
            github.event.label.name != 'test-only') && 'Unrelated label event' || 'PR description' }}
+    # upstream's contribution gate; this fork's own PRs are not upstream PRs
+    if: github.repository == 'ivall/xcl'
     runs-on: ubuntu-latest
     env:
       UNRELATED_LABEL: >-
